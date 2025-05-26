@@ -1,8 +1,8 @@
-# Chat Pro
-
-Chat Pro is a command-line multi-client chat application written in C, featuring user nicknames, status updates, file transfer, and real-time messaging over TCP sockets. It demonstrates concurrency, socket programming, and client-server architecture with pthreads.
-
----
+| Component             | Role Summary                                                                         |
+| --------------------- | ------------------------------------------------------------------------------------ |
+| **client.c**          | Runs on the user's machine. Acts as a UI+network front-end to send/receive messages. |
+| **server.c**          | Central message hub. Receives messages, handles commands, manages state.             |
+| **client\_manager.c** | Server-side helper for tracking users, updating status, and broadcasting.            |
 
 ## Features
 

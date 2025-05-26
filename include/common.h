@@ -14,7 +14,7 @@ typedef struct {
     int socket;
     char username[USERNAME_MAX];
     char status[16]; // online, away, busy
-    int active; // 1 if connected, 0 if free slot
+    int active; 
 } client_t;
 
 extern client_t clients[MAX_CLIENTS];

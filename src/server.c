@@ -8,81 +8,16 @@
 #include <fcntl.h>
 #include <time.h>
 
+#include "client_manager.h"
 #include "common.h"
+#include "utils.h"  // ✅ Use utility functions here
+
+#define PORT 12345
 
 int client_socket = -1;
 char client_username[USERNAME_MAX];
 int username_received = 0;
 int client_connected = 0;
-
-void trim_newline(char *str) {
-    size_t len = strlen(str);
-    if (len > 0 && str[len - 1] == '\n')
-        str[len - 1] = '\0';
-}
-
-void print_timestamped(const char *msg) {
-    char buffer[BUFFER_SIZE];
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    snprintf(buffer, sizeof(buffer), "[%02d:%02d:%02d] %s\n",
-             t->tm_hour, t->tm_min, t->tm_sec, msg);
-    printf("%s", buffer);
-}
-
-void send_message(int sock, const char *msg) {
-    send(sock, msg, strlen(msg), 0);
-}
-
-void add_client(int sock, const char *username) {
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (!clients[i].active) {
-            clients[i].socket = sock;
-            strncpy(clients[i].username, username, USERNAME_MAX - 1);
-            clients[i].username[USERNAME_MAX - 1] = '\0';
-            strncpy(clients[i].status, "online", sizeof(clients[i].status) - 1);
-            clients[i].status[sizeof(clients[i].status) - 1] = '\0';
-            clients[i].active = 1;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&clients_mutex);
-}
-
-void remove_client(int sock) {
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i].active && clients[i].socket == sock) {
-            clients[i].active = 0;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&clients_mutex);
-}
-
-int find_client_index(int sock) {
-    int idx = -1;
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i].active && clients[i].socket == sock) {
-            idx = i;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&clients_mutex);
-    return idx;
-}
-
-void broadcast_message(const char *msg) {
-    pthread_mutex_lock(&clients_mutex);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i].active) {
-            send(clients[i].socket, msg, strlen(msg), 0);
-        }
-    }
-    pthread_mutex_unlock(&clients_mutex);
-}
 
 void *server_receive_handler(void *arg) {
     char buffer[BUFFER_SIZE];
@@ -96,11 +31,11 @@ void *server_receive_handler(void *arg) {
             client_connected = 0;
             exit(EXIT_SUCCESS);
         }
+
         buffer[bytes_received] = '\0';
         trim_newline(buffer);
 
         if (!username_received) {
-            // Expecting format: username|status or just username
             char *sep = strchr(buffer, '|');
             if (sep) {
                 *sep = '\0';
@@ -111,27 +46,18 @@ void *server_receive_handler(void *arg) {
                 strncpy(client_status, sep + 1, sizeof(client_status) - 1);
                 client_status[sizeof(client_status) - 1] = '\0';
 
-                add_client(client_socket, client_username);
+                add_client(client_socket, client_username, client_status);
 
-                // Update client status in clients array
-                pthread_mutex_lock(&clients_mutex);
-                int idx = find_client_index(client_socket);
-                if (idx != -1) {
-                    strncpy(clients[idx].status, client_status, sizeof(clients[idx].status) - 1);
-                    clients[idx].status[sizeof(clients[idx].status) - 1] = '\0';
-                }
-                pthread_mutex_unlock(&clients_mutex);
+
 
                 char welcome_msg[BUFFER_SIZE];
                 snprintf(welcome_msg, sizeof(welcome_msg), "User '%s' connected with status '%s'.",
                          client_username, client_status);
                 print_timestamped(welcome_msg);
-
             } else {
-                // No status provided, default to online
                 strncpy(client_username, buffer, USERNAME_MAX - 1);
                 client_username[USERNAME_MAX - 1] = '\0';
-                add_client(client_socket, client_username);
+                add_client(client_socket, client_username, "online");
 
                 char welcome_msg[BUFFER_SIZE];
                 snprintf(welcome_msg, sizeof(welcome_msg), "User '%s' connected with status 'online'.",
@@ -144,7 +70,6 @@ void *server_receive_handler(void *arg) {
             continue;
         }
 
-        // Commands start with /
         if (buffer[0] == '/') {
             if (strcmp(buffer, "/list") == 0) {
                 pthread_mutex_lock(&clients_mutex);
@@ -160,15 +85,14 @@ void *server_receive_handler(void *arg) {
                 pthread_mutex_unlock(&clients_mutex);
 
                 send_message(client_socket, list_msg);
-
             } else if (strcmp(buffer, "/help") == 0) {
                 send_message(client_socket,
-                             "Commands:\n"
-                             "/list - list users\n"
-                             "/quit - disconnect\n"
-                             "/help - show commands\n"
-                             "/status <online|away|busy> - change your status\n"
-                             "/sendfile filename filesize - send file\n");
+                    "Commands:\n"
+                    "/list - list users\n"
+                    "/quit - disconnect\n"
+                    "/help - show commands\n"
+                    "/status <online|away|busy> - change your status\n"
+                    "/sendfile filename filesize - send file\n");
             } else if (strcmp(buffer, "/quit") == 0) {
                 print_timestamped("Client requested disconnect.");
                 send_message(client_socket, "Goodbye!\n");
@@ -176,15 +100,14 @@ void *server_receive_handler(void *arg) {
                 close(client_socket);
                 client_connected = 0;
                 exit(EXIT_SUCCESS);
-
             } else if (strncmp(buffer, "/status ", 8) == 0) {
                 char new_status[16];
                 if (sscanf(buffer + 8, "%15s", new_status) == 1) {
                     pthread_mutex_lock(&clients_mutex);
                     int idx = find_client_index(client_socket);
                     if (idx != -1) {
-                        strncpy(clients[idx].status, new_status, sizeof(clients[idx].status) - 1);
-                        clients[idx].status[sizeof(clients[idx].status) - 1] = '\0';
+                        strncpy(clients[idx].status, new_status, STATUS_MAX - 1);
+                        clients[idx].status[STATUS_MAX - 1] = '\0';
 
                         char status_msg[BUFFER_SIZE];
                         snprintf(status_msg, sizeof(status_msg), "%s changed status to '%s'.",
@@ -200,8 +123,7 @@ void *server_receive_handler(void *arg) {
             } else if (strncmp(buffer, "/sendfile ", 10) == 0) {
                 char filename[256];
                 long filesize;
-                int ret = sscanf(buffer + 10, "%s %ld", filename, &filesize);
-                if (ret != 2 || filesize <= 0) {
+                if (sscanf(buffer + 10, "%255s %ld", filename, &filesize) != 2 || filesize <= 0) {
                     send_message(client_socket, "Invalid /sendfile usage. Usage: /sendfile filename filesize\n");
                     continue;
                 }
@@ -219,7 +141,7 @@ void *server_receive_handler(void *arg) {
 
                 long bytes_received = 0;
                 while (bytes_received < filesize) {
-                    int to_read = (filesize - bytes_received) > BUFFER_SIZE ? BUFFER_SIZE : (filesize - bytes_received);
+                    int to_read = (filesize - bytes_received > BUFFER_SIZE) ? BUFFER_SIZE : (filesize - bytes_received);
                     int n = recv(client_socket, buffer, to_read, 0);
                     if (n <= 0) {
                         print_timestamped("File transfer interrupted.");
@@ -243,15 +165,24 @@ void *server_receive_handler(void *arg) {
             continue;
         }
 
-        // Normal message broadcasted back to client
+        // Normal message
         char formatted_msg[BUFFER_SIZE + USERNAME_MAX];
-        snprintf(formatted_msg, sizeof(formatted_msg), "%s [%s]: %s\n", client_username,
-                 clients[find_client_index(client_socket)].status, buffer);
+        int idx = find_client_index(client_socket);
+        const char *status = (idx != -1) ? clients[idx].status : "unknown";
+        snprintf(formatted_msg, sizeof(formatted_msg), "%s [%s]: %s\n", client_username, status, buffer);
         print_timestamped(formatted_msg);
         broadcast_message(formatted_msg);
     }
+
     return NULL;
 }
+
+
+
+
+
+
+
 
 void start_server() {
     int server_fd, new_socket;
@@ -284,7 +215,7 @@ void start_server() {
         pthread_mutex_lock(&clients_mutex);
         if (client_connected) {
             pthread_mutex_unlock(&clients_mutex);
-            char *msg = "Server is full. Try later.\n";
+            const char *msg = "Server is full. Try later.\n";
             send(new_socket, msg, strlen(msg), 0);
             close(new_socket);
             continue;
@@ -301,12 +232,7 @@ void start_server() {
 }
 
 int main() {
-    // Initialize clients array
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        clients[i].active = 0;
-    }
-
+    init_clients(); 
     start_server();
-
     return 0;
 }

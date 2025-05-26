@@ -3,6 +3,7 @@
 #include <time.h>
 #include <string.h>
 #include "common.h"
+#include "utils.h"
 
 // Prints a message with a timestamp prefix
 void print_timestamped(const char *msg) {
