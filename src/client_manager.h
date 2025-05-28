@@ -10,15 +10,8 @@
 #define STATUS_MAX 16
 #define BUFFER_SIZE 1024
 
-// typedef struct {
-//     int socket;
-//     char username[USERNAME_MAX];
-//     char status[STATUS_MAX];
-//     int active;
-// } Client;
-
-// extern Client clients[MAX_CLIENTS];
-// extern pthread_mutex_t clients_mutex;
+extern Client_t clients[MAX_CLIENTS];
+extern pthread_mutex_t clients_mutex;
 
 
 void init_clients();
