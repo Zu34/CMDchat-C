@@ -5,7 +5,7 @@
 #include "common.h"
 #include "utils.h"
 
-// Prints a message with a timestamp prefix
+
 void print_timestamped(const char *msg) {
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
@@ -18,7 +18,6 @@ void print_timestamped(const char *msg) {
     printf("[%s] %s\n", timebuf, msg);
 }
 
-// Removes trailing newline from a string if present
 void trim_newline(char *str) {
     size_t len = strlen(str);
     if (len == 0) return;

@@ -4,23 +4,24 @@
 #include <pthread.h>
 #include <string.h>
 #include <arpa/inet.h>
-#include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <time.h>
 
-#include "client_manager.h"
 #include "common.h"
-#include "utils.h"  // ✅ Use utility functions here
+#include "client_manager.h"
+#include "utils.h"
 
-#define PORT 12345
-
-int client_socket = -1;
-char client_username[USERNAME_MAX];
-int username_received = 0;
-int client_connected = 0;
+#define MAX_BACKLOG 10
 
 void *server_receive_handler(void *arg) {
+    int client_socket = *((int *)arg);
+    free(arg);
+
     char buffer[BUFFER_SIZE];
+    char client_username[USERNAME_MAX] = {0};
+    int client_connected = 0;
+    int initial_handshake_done = 0;
 
     while (1) {
         int bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
@@ -28,48 +29,54 @@ void *server_receive_handler(void *arg) {
             print_timestamped("Client disconnected.");
             remove_client(client_socket);
             close(client_socket);
-            client_connected = 0;
-            exit(EXIT_SUCCESS);
+            return NULL;
         }
 
         buffer[bytes_received] = '\0';
         trim_newline(buffer);
 
-        if (!username_received) {
+        if (!initial_handshake_done) {
             char *sep = strchr(buffer, '|');
             if (sep) {
                 *sep = '\0';
                 strncpy(client_username, buffer, USERNAME_MAX - 1);
                 client_username[USERNAME_MAX - 1] = '\0';
 
-                char client_status[16];
-                strncpy(client_status, sep + 1, sizeof(client_status) - 1);
-                client_status[sizeof(client_status) - 1] = '\0';
+                char client_status[STATUS_MAX];
+                strncpy(client_status, sep + 1, STATUS_MAX - 1);
+                client_status[STATUS_MAX - 1] = '\0';
 
                 add_client(client_socket, client_username, client_status);
 
-
-
                 char welcome_msg[BUFFER_SIZE];
-                snprintf(welcome_msg, sizeof(welcome_msg), "User '%s' connected with status '%s'.",
-                         client_username, client_status);
-                print_timestamped(welcome_msg);
+                snprintf(welcome_msg, sizeof(welcome_msg),
+                         "Hey %s! It's been a while. Do you want to chat? (yes/no)\n", client_username);
+                send_message(client_socket, welcome_msg);
+                initial_handshake_done = 1;
             } else {
-                strncpy(client_username, buffer, USERNAME_MAX - 1);
-                client_username[USERNAME_MAX - 1] = '\0';
-                add_client(client_socket, client_username, "online");
-
-                char welcome_msg[BUFFER_SIZE];
-                snprintf(welcome_msg, sizeof(welcome_msg), "User '%s' connected with status 'online'.",
-                         client_username);
-                print_timestamped(welcome_msg);
+                send_message(client_socket, "Invalid format. Expected: username|status\n");
             }
-
-            send_message(client_socket, "Welcome to the chat!\nType /help for commands.\n");
-            username_received = 1;
             continue;
         }
 
+        if (!client_connected) {
+            if (strcasecmp(buffer, "no") == 0) {
+                send_message(client_socket,
+                    "Okay! Here are some commands:\n"
+                    "/help - Show commands\n"
+                    "/list - List users\n"
+                    "/quit - Disconnect\n");
+                remove_client(client_socket);
+                close(client_socket);
+                return NULL;
+            } else {
+                send_message(client_socket, "Welcome to the chatroom! Type /help for commands.\n");
+                client_connected = 1;
+                continue;
+            }
+        }
+
+        // Handle commands
         if (buffer[0] == '/') {
             if (strcmp(buffer, "/list") == 0) {
                 pthread_mutex_lock(&clients_mutex);
@@ -83,25 +90,23 @@ void *server_receive_handler(void *arg) {
                     }
                 }
                 pthread_mutex_unlock(&clients_mutex);
-
                 send_message(client_socket, list_msg);
             } else if (strcmp(buffer, "/help") == 0) {
                 send_message(client_socket,
                     "Commands:\n"
-                    "/list - list users\n"
-                    "/quit - disconnect\n"
-                    "/help - show commands\n"
-                    "/status <online|away|busy> - change your status\n"
-                    "/sendfile filename filesize - send file\n");
+                    "/list - List users\n"
+                    "/quit - Disconnect\n"
+                    "/help - Show this message\n"
+                    "/status <online|away|busy> - Update your status\n"
+                    "/sendfile <filename> <size> - Send a file\n"
+                    "/msg <username> <message> - Send a private message\n");
             } else if (strcmp(buffer, "/quit") == 0) {
-                print_timestamped("Client requested disconnect.");
                 send_message(client_socket, "Goodbye!\n");
                 remove_client(client_socket);
                 close(client_socket);
-                client_connected = 0;
-                exit(EXIT_SUCCESS);
+                return NULL;
             } else if (strncmp(buffer, "/status ", 8) == 0) {
-                char new_status[16];
+                char new_status[STATUS_MAX];
                 if (sscanf(buffer + 8, "%15s", new_status) == 1) {
                     pthread_mutex_lock(&clients_mutex);
                     int idx = find_client_index(client_socket);
@@ -110,9 +115,8 @@ void *server_receive_handler(void *arg) {
                         clients[idx].status[STATUS_MAX - 1] = '\0';
 
                         char status_msg[BUFFER_SIZE];
-                        snprintf(status_msg, sizeof(status_msg), "%s changed status to '%s'.",
-                                 clients[idx].username, new_status);
-                        print_timestamped(status_msg);
+                        snprintf(status_msg, sizeof(status_msg),
+                                 "%s changed status to '%s'.", clients[idx].username, new_status);
                         broadcast_message(status_msg);
                     }
                     pthread_mutex_unlock(&clients_mutex);
@@ -124,30 +128,25 @@ void *server_receive_handler(void *arg) {
                 char filename[256];
                 long filesize;
                 if (sscanf(buffer + 10, "%255s %ld", filename, &filesize) != 2 || filesize <= 0) {
-                    send_message(client_socket, "Invalid /sendfile usage. Usage: /sendfile filename filesize\n");
+                    send_message(client_socket, "Usage: /sendfile <filename> <filesize>\n");
                     continue;
                 }
 
-                char notify[BUFFER_SIZE];
-                snprintf(notify, sizeof(notify), "Receiving file '%s' (%ld bytes)...\n", filename, filesize);
-                print_timestamped(notify);
                 send_message(client_socket, "Ready to receive file data\n");
 
                 int fd = open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644);
                 if (fd < 0) {
-                    send_message(client_socket, "Failed to open file for writing\n");
+                    send_message(client_socket, "Failed to open file\n");
                     continue;
                 }
 
                 long bytes_received = 0;
                 while (bytes_received < filesize) {
-                    int to_read = (filesize - bytes_received > BUFFER_SIZE) ? BUFFER_SIZE : (filesize - bytes_received);
+                    int to_read = (filesize - bytes_received > BUFFER_SIZE)
+                                  ? BUFFER_SIZE
+                                  : (filesize - bytes_received);
                     int n = recv(client_socket, buffer, to_read, 0);
-                    if (n <= 0) {
-                        print_timestamped("File transfer interrupted.");
-                        close(fd);
-                        break;
-                    }
+                    if (n <= 0) break;
                     write(fd, buffer, n);
                     bytes_received += n;
                 }
@@ -155,9 +154,33 @@ void *server_receive_handler(void *arg) {
 
                 if (bytes_received == filesize) {
                     send_message(client_socket, "File transfer complete!\n");
-                    char done_msg[BUFFER_SIZE];
-                    snprintf(done_msg, sizeof(done_msg), "File '%s' received successfully.", filename);
-                    print_timestamped(done_msg);
+                } else {
+                    send_message(client_socket, "File transfer interrupted.\n");
+                }
+            } else if (strncmp(buffer, "/msg ", 5) == 0) {
+                char target[USERNAME_MAX];
+                char *msg_start = buffer + 5;
+
+                if (sscanf(msg_start, "%31s", target) == 1) {
+                    char *message_body = msg_start + strlen(target) + 1;
+                    if (*message_body != '\0') {
+                        int sender_idx = find_client_index(client_socket);
+                        if (sender_idx != -1) {
+                            char full_msg[BUFFER_SIZE + USERNAME_MAX];
+                            snprintf(full_msg, sizeof(full_msg),
+                                     "[PM from %s]: %s\n", clients[sender_idx].username, message_body);
+
+                            if (!send_private_message(target, full_msg)) {
+                                send_message(client_socket, "User not found or not online.\n");
+                            } else {
+                                send_message(client_socket, "Private message sent.\n");
+                            }
+                        }
+                    } else {
+                        send_message(client_socket, "Usage: /msg <username> <message>\n");
+                    }
+                } else {
+                    send_message(client_socket, "Usage: /msg <username> <message>\n");
                 }
             } else {
                 send_message(client_socket, "Unknown command. Type /help for commands.\n");
@@ -165,74 +188,59 @@ void *server_receive_handler(void *arg) {
             continue;
         }
 
-        // Normal message
-        char formatted_msg[BUFFER_SIZE + USERNAME_MAX];
+        // Broadcast normal chat message
         int idx = find_client_index(client_socket);
         const char *status = (idx != -1) ? clients[idx].status : "unknown";
-        snprintf(formatted_msg, sizeof(formatted_msg), "%s [%s]: %s\n", client_username, status, buffer);
-        print_timestamped(formatted_msg);
-        broadcast_message(formatted_msg);
+
+        char chat_msg[BUFFER_SIZE + USERNAME_MAX];
+        snprintf(chat_msg, sizeof(chat_msg), "%s [%s]: %s\n", client_username, status, buffer);
+        broadcast_message(chat_msg);
     }
 
     return NULL;
 }
 
-
-
-
-
-
-
-
 void start_server() {
     int server_fd, new_socket;
-    struct sockaddr_in address;
-    int addrlen = sizeof(address);
+    struct sockaddr_in addr;
+    socklen_t addrlen = sizeof(addr);
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0)
-        HANDLE_ERROR("socket failed");
+        HANDLE_ERROR("socket");
 
     int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)))
-        HANDLE_ERROR("setsockopt");
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(PORT);
 
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0)
-        HANDLE_ERROR("bind failed");
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+        HANDLE_ERROR("bind");
 
-    if (listen(server_fd, 3) < 0)
+    if (listen(server_fd, MAX_BACKLOG) < 0)
         HANDLE_ERROR("listen");
 
     print_timestamped("Server started and listening...");
 
     while (1) {
-        if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen)) < 0)
-            HANDLE_ERROR("accept");
-
-        pthread_mutex_lock(&clients_mutex);
-        if (client_connected) {
-            pthread_mutex_unlock(&clients_mutex);
-            const char *msg = "Server is full. Try later.\n";
-            send(new_socket, msg, strlen(msg), 0);
-            close(new_socket);
+        new_socket = accept(server_fd, (struct sockaddr *)&addr, &addrlen);
+        if (new_socket < 0) {
+            perror("accept failed");
             continue;
         }
-        client_connected = 1;
-        pthread_mutex_unlock(&clients_mutex);
 
-        client_socket = new_socket;
-        username_received = 0;
+        int *client_sock_ptr = malloc(sizeof(int));
+        *client_sock_ptr = new_socket;
 
         pthread_t tid;
-        pthread_create(&tid, NULL, server_receive_handler, NULL);
+        pthread_create(&tid, NULL, server_receive_handler, client_sock_ptr);
+        pthread_detach(tid);
     }
 }
 
 int main() {
-    init_clients(); 
+    init_clients();
     start_server();
     return 0;
 }

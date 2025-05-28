@@ -2,9 +2,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include "common.h"
 
-Client clients[MAX_CLIENTS];
-pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 
 void init_clients() {
     pthread_mutex_lock(&clients_mutex);
