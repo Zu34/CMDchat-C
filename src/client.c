@@ -10,6 +10,7 @@
 
 int sock;
 
+
 void print_usage(const char *prog) {
     printf("Usage: %s [-h] -a <server_ip> -p <port> -u <username>\n", prog);
     printf("Options:\n");

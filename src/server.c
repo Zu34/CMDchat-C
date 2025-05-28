@@ -14,13 +14,10 @@
 
 #define MAX_BACKLOG 10
 
-void *server_receive_handler(void *arg) {
-    int client_socket = *((int *)arg);
-    free(arg);
 
+
+void *server_receive_handler(void *arg) {
     char buffer[BUFFER_SIZE];
-    char client_username[USERNAME_MAX] = {0};
-    int client_connected = 0;
     int initial_handshake_done = 0;
 
     while (1) {
@@ -29,7 +26,8 @@ void *server_receive_handler(void *arg) {
             print_timestamped("Client disconnected.");
             remove_client(client_socket);
             close(client_socket);
-            return NULL;
+            client_connected = 0;
+            exit(EXIT_SUCCESS);
         }
 
         buffer[bytes_received] = '\0';
@@ -55,6 +53,7 @@ void *server_receive_handler(void *arg) {
                 initial_handshake_done = 1;
             } else {
                 send_message(client_socket, "Invalid format. Expected: username|status\n");
+                continue;
             }
             continue;
         }
@@ -66,9 +65,8 @@ void *server_receive_handler(void *arg) {
                     "/help - Show commands\n"
                     "/list - List users\n"
                     "/quit - Disconnect\n");
-                remove_client(client_socket);
                 close(client_socket);
-                return NULL;
+                exit(EXIT_SUCCESS);
             } else {
                 send_message(client_socket, "Welcome to the chatroom! Type /help for commands.\n");
                 client_connected = 1;
@@ -76,7 +74,6 @@ void *server_receive_handler(void *arg) {
             }
         }
 
-        // Handle commands
         if (buffer[0] == '/') {
             if (strcmp(buffer, "/list") == 0) {
                 pthread_mutex_lock(&clients_mutex);
@@ -99,12 +96,16 @@ void *server_receive_handler(void *arg) {
                     "/help - Show this message\n"
                     "/status <online|away|busy> - Update your status\n"
                     "/sendfile <filename> <size> - Send a file\n"
-                    "/msg <username> <message> - Send a private message\n");
+                    "/join <room> [limit] - Join or create a room\n"
+                    "/leave - Leave current room\n"
+                    "/rooms - List all rooms\n");
             } else if (strcmp(buffer, "/quit") == 0) {
+                print_timestamped("Client requested disconnect.");
                 send_message(client_socket, "Goodbye!\n");
                 remove_client(client_socket);
                 close(client_socket);
-                return NULL;
+                client_connected = 0;
+                exit(EXIT_SUCCESS);
             } else if (strncmp(buffer, "/status ", 8) == 0) {
                 char new_status[STATUS_MAX];
                 if (sscanf(buffer + 8, "%15s", new_status) == 1) {
@@ -117,6 +118,7 @@ void *server_receive_handler(void *arg) {
                         char status_msg[BUFFER_SIZE];
                         snprintf(status_msg, sizeof(status_msg),
                                  "%s changed status to '%s'.", clients[idx].username, new_status);
+                        print_timestamped(status_msg);
                         broadcast_message(status_msg);
                     }
                     pthread_mutex_unlock(&clients_mutex);
@@ -146,7 +148,10 @@ void *server_receive_handler(void *arg) {
                                   ? BUFFER_SIZE
                                   : (filesize - bytes_received);
                     int n = recv(client_socket, buffer, to_read, 0);
-                    if (n <= 0) break;
+                    if (n <= 0) {
+                        print_timestamped("File transfer interrupted.");
+                        break;
+                    }
                     write(fd, buffer, n);
                     bytes_received += n;
                 }
@@ -154,51 +159,58 @@ void *server_receive_handler(void *arg) {
 
                 if (bytes_received == filesize) {
                     send_message(client_socket, "File transfer complete!\n");
-                } else {
-                    send_message(client_socket, "File transfer interrupted.\n");
                 }
-            } else if (strncmp(buffer, "/msg ", 5) == 0) {
-                char target[USERNAME_MAX];
-                char *msg_start = buffer + 5;
+            } else if (strncmp(buffer, "/join ", 6) == 0) {
+                char room_name[ROOM_NAME_MAX];
+                int limit = ROOM_USER_LIMIT;
 
-                if (sscanf(msg_start, "%31s", target) == 1) {
-                    char *message_body = msg_start + strlen(target) + 1;
-                    if (*message_body != '\0') {
-                        int sender_idx = find_client_index(client_socket);
-                        if (sender_idx != -1) {
-                            char full_msg[BUFFER_SIZE + USERNAME_MAX];
-                            snprintf(full_msg, sizeof(full_msg),
-                                     "[PM from %s]: %s\n", clients[sender_idx].username, message_body);
-
-                            if (!send_private_message(target, full_msg)) {
-                                send_message(client_socket, "User not found or not online.\n");
-                            } else {
-                                send_message(client_socket, "Private message sent.\n");
-                            }
-                        }
-                    } else {
-                        send_message(client_socket, "Usage: /msg <username> <message>\n");
+                int args = sscanf(buffer + 6, "%31s %d", room_name, &limit);
+                if (args < 1) {
+                    send_message(client_socket, "Usage: /join <room_name> [limit]\n");
+                } else {
+                    int result = join_room(client_socket, room_name, limit);
+                    if (result == 0) {
+                        char join_msg[BUFFER_SIZE];
+                        snprintf(join_msg, sizeof(join_msg), "Joined room '%s'.\n", room_name);
+                        send_message(client_socket, join_msg);
+                    } else if (result == -1) {
+                        send_message(client_socket, "Failed to create or join room (room list full).\n");
+                    } else if (result == -2) {
+                        send_message(client_socket, "Room is full.\n");
                     }
-                } else {
-                    send_message(client_socket, "Usage: /msg <username> <message>\n");
                 }
+            } else if (strcmp(buffer, "/leave") == 0) {
+                int idx = find_client_index(client_socket);
+                if (idx != -1 && clients[idx].current_room[0] != '\0') {
+                    char room_name[ROOM_NAME_MAX];
+                    strncpy(room_name, clients[idx].current_room, ROOM_NAME_MAX);
+                    leave_room(client_socket, room_name);
+                    send_message(client_socket, "You have left the room.\n");
+                } else {
+                    send_message(client_socket, "You're not in any room.\n");
+                }
+            } else if (strcmp(buffer, "/rooms") == 0) {
+                list_rooms(client_socket);
             } else {
                 send_message(client_socket, "Unknown command. Type /help for commands.\n");
             }
             continue;
         }
 
-        // Broadcast normal chat message
         int idx = find_client_index(client_socket);
-        const char *status = (idx != -1) ? clients[idx].status : "unknown";
-
-        char chat_msg[BUFFER_SIZE + USERNAME_MAX];
-        snprintf(chat_msg, sizeof(chat_msg), "%s [%s]: %s\n", client_username, status, buffer);
-        broadcast_message(chat_msg);
+        if (idx != -1 && clients[idx].current_room[0] != '\0') {
+            char chat_msg[BUFFER_SIZE + USERNAME_MAX];
+            snprintf(chat_msg, sizeof(chat_msg), "%s [%s]: %s\n", client_username, clients[idx].status, buffer);
+            print_timestamped(chat_msg);
+            broadcast_to_room(clients[idx].current_room, chat_msg);
+        } else {
+            send_message(client_socket, "Join a room to send messages. Use /join <room>\n");
+        }
     }
 
     return NULL;
 }
+
 
 void start_server() {
     int server_fd, new_socket;
