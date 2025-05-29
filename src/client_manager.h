@@ -10,6 +10,29 @@
 #define STATUS_MAX 16
 #define BUFFER_SIZE 1024
 
+
+#define MAX_REACTIONS 10
+#define MAX_REPLIES 10
+#define MAX_MSG_ID 9999
+
+// typedef struct {
+//     int id;
+//     char sender[USERNAME_MAX];
+//     char content[BUFFER_SIZE];
+//     char room[ROOM_NAME_MAX];
+//     char reactions[MAX_REACTIONS][16];  // emojis
+//     int reaction_count;
+//     char replies[MAX_REPLIES][BUFFER_SIZE];
+//     int reply_count;
+// } ChatMessage;
+
+
+
+
+
+
+
+
 extern Client_t clients[MAX_CLIENTS];
 extern pthread_mutex_t clients_mutex;
 
